@@ -1,0 +1,26 @@
+{
+  "name": "trigger-maturador",
+  "version": "1.0.0",
+  "description": "Script para automatizar envio de mensagens entre instâncias do WhatsApp via wuzapi",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "ts-node src/index.ts",
+    "clean": "rimraf dist"
+  },
+  "keywords": ["whatsapp", "wuzapi", "automation", "typescript"],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.0.0",
+    "ts-node": "^10.9.0",
+    "rimraf": "^5.0.0"
+  },
+  "dependencies": {
+    "axios": "^1.6.0",
+    "dotenv": "^16.3.0",
+    "date-fns": "^2.30.0"
+  }
+}
