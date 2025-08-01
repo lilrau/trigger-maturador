@@ -3,51 +3,17 @@ import * as dotenv from 'dotenv';
 import * as fs from 'fs';
 import * as path from 'path';
 import { messageLogger, MessageLogger } from './logger';
+import { PersonalityManager } from './personalities';
+import { 
+  WuzapiInstance, 
+  WuzapiResponse, 
+  MessageStatus, 
+  MessageType, 
+  MessageSequence 
+} from './types';
 
 // Carrega variáveis de ambiente
 dotenv.config();
-
-interface WuzapiInstance {
-  id: string;
-  jid: string;
-  name: string;
-  token: string;
-  connected: boolean;
-  loggedIn: boolean;
-  events: string;
-  expiration: number;
-  proxy_url: string;
-  qrcode: string;
-  webhook: string;
-}
-
-interface WuzapiResponse {
-  code: number;
-  data: WuzapiInstance[];
-  success: boolean;
-}
-
-interface MessageStatus {
-  from: string;
-  to: string;
-  sent: boolean;
-}
-
-enum MessageType {
-  TEXT = 'text',
-  AUDIO = 'audio',
-  IMAGE = 'image',
-  VIDEO = 'video',
-  DOCUMENT = 'document',
-  STICKER = 'sticker',
-  LOCATION = 'location'
-}
-
-enum MessageSequence {
-  MEDIA_ONLY = 'media_only',
-  MEDIA_THEN_TEXT = 'media_then_text',
-  TEXT_THEN_MEDIA = 'text_then_media'
-}
 
 const MESSAGE_DICTIONARY = [
   "Tô de boa por aqui 😌",
@@ -118,6 +84,7 @@ class TriggerMaturador {
   private logger: MessageLogger;
   private instanceTimers: Map<string, NodeJS.Timeout> = new Map();
   private isRunning: boolean = false;
+  private personalityManager: PersonalityManager;
 
   constructor() {
     this.baseUrl = process.env.WUZAPI_BASE_URL || 'https://wuzapi.ugui.tech';
@@ -138,6 +105,8 @@ class TriggerMaturador {
         'Content-Type': 'application/json'
       }
     });
+    
+    this.personalityManager = new PersonalityManager();
   }
 
   /**
@@ -201,9 +170,15 @@ class TriggerMaturador {
   }
 
   /**
-   * Seleciona aleatoriamente um tipo de mensagem
+   * Seleciona aleatoriamente um tipo de mensagem baseado na personalidade
    */
-  private getRandomMessageType(): MessageType {
+  private getRandomMessageType(instanceId: string): MessageType {
+    const personality = this.personalityManager.getPersonality(instanceId);
+    if (personality) {
+      return this.personalityManager.selectMediaType(instanceId);
+    }
+    
+    // Fallback para comportamento original
     const types = Object.values(MessageType);
     const idx = Math.floor(Math.random() * types.length);
     return types[idx];
@@ -219,7 +194,7 @@ class TriggerMaturador {
   }
 
   /**
-   * Lê um item aleatório de um arquivo JSON sem carregar o arquivo inteiro
+   * Lê um item aleatório de um arquivo JSON
    * @param type Tipo de mídia (audio, image, video, document, sticker, location)
    * @returns Uma string base64 aleatória do arquivo ou objeto de localização
    */
@@ -243,7 +218,7 @@ class TriggerMaturador {
         const locationFn = new Function(locationJsContent);
         const locationData = locationFn();
         
-        // Retornar o primeiro item (ou um aleatório se houver mais)
+        // Retornar um item aleatório
         const randomLocation = locationData[Math.floor(Math.random() * locationData.length)];
         return randomLocation.json;
       }
@@ -256,103 +231,94 @@ class TriggerMaturador {
         return '';
       }
 
-      // Ler o tamanho do arquivo
-      const stats = fs.statSync(filePath);
+      // Ler e parsear o arquivo JSON completo
+      const fileContent = fs.readFileSync(filePath, 'utf8');
+      const mediaArray = JSON.parse(fileContent);
       
-      // Abrir o arquivo para leitura
-      const fd = fs.openSync(filePath, 'r');
-      
-      // Ler os primeiros 100 bytes para determinar a estrutura do JSON
-      const buffer = Buffer.alloc(100);
-      fs.readSync(fd, buffer, 0, 100, 0);
-      const start = buffer.toString().indexOf('[');
-      
-      if (start === -1) {
-        fs.closeSync(fd);
-        throw new Error(`Formato inválido no arquivo ${filePath}`);
-      }
-      
-      // Ler uma pequena parte do arquivo para contar quantos itens existem
-      // Isso é uma estimativa, não é preciso
-      const sampleBuffer = Buffer.alloc(1000);
-      fs.readSync(fd, sampleBuffer, 0, 1000, start);
-      const sampleText = sampleBuffer.toString();
-      
-      // Contar aproximadamente quantos itens existem baseado na amostra
-      const commaCount = (sampleText.match(/,/g) || []).length;
-      const estimatedItems = Math.max(5, commaCount); // Pelo menos 5 itens
-      
-      // Escolher um índice aleatório
-      const randomIndex = Math.floor(Math.random() * estimatedItems);
-      
-      // Tentar encontrar o item no índice escolhido
-      let currentIndex = 0;
-      let currentPos = start + 1; // Pular o '['
-      let itemStart = -1;
-      let itemEnd = -1;
-      let inQuote = false;
-      let escaping = false;
-      
-      // Ler o arquivo em chunks para encontrar o item desejado
-      const chunkSize = 1024;
-      const chunk = Buffer.alloc(chunkSize);
-      
-      while (currentPos < stats.size) {
-        const bytesRead = fs.readSync(fd, chunk, 0, chunkSize, currentPos);
-        if (bytesRead === 0) break;
-        
-        for (let i = 0; i < bytesRead; i++) {
-          const char = String.fromCharCode(chunk[i]);
-          
-          if (escaping) {
-            escaping = false;
-            continue;
-          }
-          
-          if (char === '\\') {
-            escaping = true;
-            continue;
-          }
-          
-          if (char === '"') {
-            inQuote = !inQuote;
-            if (inQuote && itemStart === -1 && currentIndex === randomIndex) {
-              itemStart = currentPos + i + 1; // Início do conteúdo da string
-            } else if (!inQuote && itemStart !== -1 && itemEnd === -1) {
-              itemEnd = currentPos + i; // Fim do conteúdo da string
-              break;
-            }
-            continue;
-          }
-          
-          if (!inQuote && char === ',') {
-            currentIndex++;
-          }
-        }
-        
-        if (itemEnd !== -1) break;
-        currentPos += bytesRead;
-      }
-      
-      fs.closeSync(fd);
-      
-      if (itemStart === -1 || itemEnd === -1) {
-        console.error(`Não foi possível encontrar um item válido no arquivo ${filePath}`);
+      // Verificar se é um array válido
+      if (!Array.isArray(mediaArray) || mediaArray.length === 0) {
+        console.error(`Arquivo ${filePath} não contém um array válido ou está vazio`);
         return '';
       }
       
-      // Ler o item encontrado
-      const itemLength = itemEnd - itemStart;
-      const itemBuffer = Buffer.alloc(itemLength);
-      const itemFd = fs.openSync(filePath, 'r');
-      fs.readSync(itemFd, itemBuffer, 0, itemLength, itemStart);
-      fs.closeSync(itemFd);
+      // Selecionar um item aleatório
+      const randomIndex = Math.floor(Math.random() * mediaArray.length);
+      const selectedItem = mediaArray[randomIndex];
       
-      return itemBuffer.toString();
+      console.log(`Selecionado item ${randomIndex + 1} de ${mediaArray.length} do arquivo ${type}.json`);
+      
+      return selectedItem;
     } catch (error) {
       console.error(`Erro ao ler base64 para ${type}:`, error);
       return '';
     }
+  }
+
+  /**
+   * Gera uma legenda aleatória para mídias
+   */
+  private getRandomCaption(mediaType: string): string {
+    const captions = {
+      image: [
+        "Olha só essa imagem! 📸",
+        "Que foto massa! 🔥",
+        "Imagem do dia 📷",
+        "Vê se não é linda essa foto! ✨",
+        "Registro importante 📸",
+        "Momento capturado! 📷",
+        "Imagem aleatória do maturador 🤖",
+        "Foto enviada com carinho 💝",
+        "Que visual! 😍",
+        "Imagem selecionada especialmente 🎯"
+      ],
+      video: [
+        "Vídeo imperdível! 🎬",
+        "Assiste aí esse vídeo! 📹",
+        "Conteúdo audiovisual 🎥",
+        "Vídeo do momento 🎬",
+        "Material em movimento 📹",
+        "Vídeo selecionado! 🎯",
+        "Conteúdo dinâmico 🎥",
+        "Vídeo enviado pelo maturador 🤖",
+        "Que vídeo show! 🔥",
+        "Material audiovisual especial ✨"
+      ]
+    };
+    
+    const typeCaptions = captions[mediaType as keyof typeof captions] || [
+      "Mídia enviada pelo maturador 🤖",
+      "Conteúdo especial! ✨",
+      "Material selecionado 🎯"
+    ];
+    
+    const randomIndex = Math.floor(Math.random() * typeCaptions.length);
+    return typeCaptions[randomIndex];
+  }
+
+  /**
+   * Gera um nome de arquivo aleatório para documentos
+   */
+  private getRandomFileName(): string {
+    const prefixes = [
+      'documento',
+      'arquivo',
+      'relatorio',
+      'planilha',
+      'texto',
+      'dados',
+      'informacoes',
+      'material',
+      'conteudo',
+      'anexo'
+    ];
+    
+    const extensions = ['.txt', '.pdf', '.doc', '.docx', '.xls', '.xlsx'];
+    
+    const randomPrefix = prefixes[Math.floor(Math.random() * prefixes.length)];
+    const randomExtension = extensions[Math.floor(Math.random() * extensions.length)];
+    const timestamp = Date.now();
+    
+    return `${randomPrefix}_${timestamp}${randomExtension}`;
   }
 
   /**
@@ -379,7 +345,7 @@ class TriggerMaturador {
           const imageBase64 = await this.getRandomBase64('image');
           if (!imageBase64) return false;
           payload.Image = `data:image/jpeg;base64,${imageBase64}`;
-          payload.Caption = 'Imagem enviada pelo maturador';
+          payload.Caption = this.getRandomCaption('image');
           break;
           
         case MessageType.VIDEO:
@@ -387,7 +353,7 @@ class TriggerMaturador {
           const videoBase64 = await this.getRandomBase64('video');
           if (!videoBase64) return false;
           payload.Video = `data:video/mp4;base64,${videoBase64}`;
-          payload.Caption = 'Vídeo enviado pelo maturador';
+          payload.Caption = this.getRandomCaption('video');
           break;
           
         case MessageType.DOCUMENT:
@@ -395,7 +361,7 @@ class TriggerMaturador {
           const docBase64 = await this.getRandomBase64('document');
           if (!docBase64) return false;
           payload.Document = `data:application/octet-stream;base64,${docBase64}`;
-          payload.FileName = `documento_${Date.now()}.txt`;
+          payload.FileName = this.getRandomFileName();
           break;
           
         case MessageType.STICKER:
@@ -490,7 +456,7 @@ class TriggerMaturador {
   /**
    * Envia uma mensagem de uma instância para outra com tipo e sequência aleatórios
    */
-  async sendMessage(fromInstanceToken: string, toPhone: string, textMessage: string): Promise<boolean> {
+  async sendMessage(fromInstanceToken: string, toPhone: string, textMessage: string, instanceId?: string): Promise<boolean> {
     try {
       // Seleciona aleatoriamente uma sequência de mensagens
       const messageSequence = this.getRandomMessageSequence();
@@ -502,9 +468,29 @@ class TriggerMaturador {
       // Registrar no log o início da sequência
       this.logger.logMessageSequence(fromPhone, toPhone, messageSequence);
       
-      // Seleciona aleatoriamente um tipo de mídia (exceto texto)
-      const mediaTypes = Object.values(MessageType).filter(type => type !== MessageType.TEXT);
-      const randomMediaType = mediaTypes[Math.floor(Math.random() * mediaTypes.length)] as MessageType;
+      // Seleciona tipo de mídia baseado na personalidade (se disponível)
+      let randomMediaType: MessageType;
+      if (instanceId) {
+        randomMediaType = this.getRandomMessageType(instanceId);
+        // Se retornou TEXT, seleciona mídia aleatória
+        if (randomMediaType === MessageType.TEXT) {
+          const mediaTypes = Object.values(MessageType).filter(type => type !== MessageType.TEXT);
+          randomMediaType = mediaTypes[Math.floor(Math.random() * mediaTypes.length)] as MessageType;
+        }
+      } else {
+        // Fallback para comportamento original
+        const mediaTypes = Object.values(MessageType).filter(type => type !== MessageType.TEXT);
+        randomMediaType = mediaTypes[Math.floor(Math.random() * mediaTypes.length)] as MessageType;
+      }
+      
+      // Gera mensagem personalizada se houver personalidade
+      let personalizedMessage = textMessage;
+      if (instanceId) {
+        const generatedMessage = this.personalityManager.generatePersonalizedMessage(instanceId, 'casual');
+        if (generatedMessage) {
+          personalizedMessage = generatedMessage;
+        }
+      }
       
       let success = false;
       
@@ -526,7 +512,7 @@ class TriggerMaturador {
             const waitTime = 5000 + Math.floor(Math.random() * 10000);
             await new Promise(resolve => setTimeout(resolve, waitTime));
             
-            const textSuccess = await this.sendTextMessage(fromInstanceToken, toPhone, textMessage);
+            const textSuccess = await this.sendTextMessage(fromInstanceToken, toPhone, personalizedMessage);
             console.log(`Enviado texto após mídia para ${toPhone}: ${textSuccess ? 'Sucesso' : 'Falha'}`);
             
             // Considera sucesso se pelo menos a mídia foi enviada
@@ -535,7 +521,7 @@ class TriggerMaturador {
           
         case MessageSequence.TEXT_THEN_MEDIA:
           // Envia texto primeiro
-          success = await this.sendTextMessage(fromInstanceToken, toPhone, textMessage);
+          success = await this.sendTextMessage(fromInstanceToken, toPhone, personalizedMessage);
           console.log(`Enviado texto para ${toPhone}: ${success ? 'Sucesso' : 'Falha'}`);
           
           // Se o texto foi enviado com sucesso, aguarda um pouco e envia mídia
@@ -553,7 +539,7 @@ class TriggerMaturador {
           
         default:
           // Caso padrão: envia apenas texto
-          success = await this.sendTextMessage(fromInstanceToken, toPhone, textMessage);
+          success = await this.sendTextMessage(fromInstanceToken, toPhone, personalizedMessage);
       }
       
       return success;
@@ -591,10 +577,23 @@ class TriggerMaturador {
       clearTimeout(this.instanceTimers.get(instanceId)!);
     }
     
-    // Calcula intervalo aleatório para esta instância
-    const interval = Math.floor(Math.random() * (this.maxInterval - this.minInterval + 1)) + this.minInterval;
+    // Atribui personalidade à instância se ainda não tiver
+    if (!this.personalityManager.getPersonality(instanceId)) {
+      this.personalityManager.assignPersonality(instanceId);
+    }
     
-    console.log(`⏰ Timer iniciado para ${instance.name} (${this.extractPhoneFromJid(instance.jid)}): ${interval / 1000}s`);
+    // Calcula intervalo baseado na personalidade
+    let interval = this.personalityManager.calculateMessageInterval(instanceId);
+    
+    // Se não conseguiu calcular pela personalidade, usa o método original
+    if (!interval) {
+      interval = Math.floor(Math.random() * (this.maxInterval - this.minInterval + 1)) + this.minInterval;
+    }
+    
+    const personality = this.personalityManager.getPersonality(instanceId);
+    const personalityName = personality ? personality.name : 'Padrão';
+    
+    console.log(`⏰ Timer iniciado para ${instance.name} (${this.extractPhoneFromJid(instance.jid)}) - Personalidade: ${personalityName}: ${interval / 1000}s`);
     
     const timer = setTimeout(async () => {
       if (this.isRunning) {
@@ -634,11 +633,25 @@ class TriggerMaturador {
       
       console.log(`📤 ${instance.name} (${fromPhone}) → ${targetInstance.name} (${toPhone})`);
       
+      // Verifica se a instância deve enviar mensagem baseado na personalidade
+      const shouldSendMessage = this.personalityManager.shouldSendMessage(instance.id);
+      if (!shouldSendMessage) {
+        console.log(`🤐 Instância ${instance.name} decidiu não enviar mensagem (baseado na personalidade)`);
+        return;
+      }
+      
+      // Verifica se está no horário ativo da personalidade
+      const isActiveTime = this.personalityManager.isActiveTime(instance.id);
+      if (!isActiveTime) {
+        console.log(`😴 Instância ${instance.name} está fora do horário ativo`);
+        return;
+      }
+      
       // Sorteia uma mensagem aleatória
       const randomMessage = getRandomMessage();
       
-      // Envia a mensagem
-      const success = await this.sendMessage(instance.token, toPhone, randomMessage);
+      // Envia a mensagem com personalidade
+      const success = await this.sendMessage(instance.token, toPhone, randomMessage, instance.id);
       
       if (success) {
         console.log(`✅ Mensagem enviada com sucesso: ${fromPhone} → ${toPhone}`);
@@ -664,6 +677,23 @@ class TriggerMaturador {
       console.log(`Timer parado para instância ${instanceId}`);
     });
     this.instanceTimers.clear();
+  }
+
+  /**
+   * Exibe estatísticas das personalidades
+   */
+  private displayPersonalityStats(): void {
+    const stats = this.personalityManager.getPersonalityStats();
+    const hasInstances = stats.some(stat => stat.count > 0);
+    
+    if (hasInstances) {
+      console.log('\n👥 Estatísticas das Personalidades:');
+      stats.forEach(stat => {
+        if (stat.count > 0) {
+          console.log(`  ${stat.name}: ${stat.count} instância(s)`);
+        }
+      });
+    }
   }
 
   /**
@@ -706,6 +736,9 @@ class TriggerMaturador {
           });
           
           console.log(`⏱️ Total de timers ativos: ${this.instanceTimers.size}`);
+          
+          // Exibe estatísticas das personalidades
+          this.displayPersonalityStats();
           
         } catch (error) {
           console.error('Erro ao gerenciar instâncias:', error);
